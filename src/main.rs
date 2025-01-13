@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::convert::Infallible;
 use hex;
+use std::env;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct GIORequest {
@@ -61,15 +62,28 @@ async fn handle_completion(req: Request<Body>) -> Result<Response<Body>, Infalli
     };
 
     let gio_request_json = serde_json::to_string(&gio_request).unwrap();
+    let rollup_http_server_url = env::var("ROLLUP_HTTP_SERVER_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let gio_url = format!("{}/gio", rollup_http_server_url);
+
+    println!("Forwarding request to: {}", gio_url);
+    println!("Request body: {}", gio_request_json);
+
+    let client = hyper::Client::new();
 
     let mock_request = Request::builder()
         .method(Method::POST)
-        .uri("/gio")
+        .uri(gio_url)
         .header("Content-Type", "application/json")
         .body(Body::from(gio_request_json))
         .unwrap();
 
-    handle_gio(mock_request).await
+    match client.request(mock_request).await {
+        Ok(res) => Ok(res),
+        Err(_) => Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from("Could not forward request"))
+            .unwrap()),
+    }
 }
 
 async fn handle_gio(req: Request<Body>) -> Result<Response<Body>, Infallible> {
