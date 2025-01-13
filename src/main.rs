@@ -2,11 +2,12 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, Method, Request, Response, Server, StatusCode,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::convert::Infallible;
-use tokio::runtime::Runtime;
+use hex;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Debug)]
 struct GIORequest {
     domain: u16,
     id: String,
@@ -19,6 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let make_svc = make_service_fn(|_conn| async {
         Ok::<_, Infallible>(service_fn(router))
     });
+
     let server = Server::bind(&addr).serve(make_svc);
 
     println!("Server running at http://{}...", addr);
@@ -28,13 +30,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 async fn router(req: Request<Body>) -> Result<Response<Body>, Infallible> {
-    if req.method() == Method::POST && req.uri().path() == "/completion" {
-        handle_completion(req).await
-    } else {
-        Ok(Response::builder()
+    match (req.method(), req.uri().path()) {
+        (&Method::POST, "/completion") => handle_completion(req).await,
+        (&Method::POST, "/gio") => handle_gio(req).await,
+        _ => Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Body::from("Not Found"))
-            .unwrap())
+            .unwrap()),
     }
 }
 
@@ -42,8 +44,7 @@ async fn handle_completion(req: Request<Body>) -> Result<Response<Body>, Infalli
     let whole_body = hyper::body::to_bytes(req.into_body()).await;
     let body_bytes = match whole_body {
         Ok(bytes) => bytes,
-        Err(err) => {
-            eprintln!("Error reading body: {}", err);
+        Err(_) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Body::from("Could not read request body"))
@@ -52,7 +53,6 @@ async fn handle_completion(req: Request<Body>) -> Result<Response<Body>, Infalli
     };
 
     let raw_json_str = String::from_utf8_lossy(&body_bytes);
-
     let hex_encoded = hex::encode(raw_json_str.as_bytes());
 
     let gio_request = GIORequest {
@@ -60,45 +60,43 @@ async fn handle_completion(req: Request<Body>) -> Result<Response<Body>, Infalli
         id: hex_encoded,
     };
 
-    let rollup_url = match std::env::var("ROLLUP_HTTP_SERVER_URL") {
-        Ok(url) => url,
+    let gio_request_json = serde_json::to_string(&gio_request).unwrap();
+
+    let mock_request = Request::builder()
+        .method(Method::POST)
+        .uri("/gio")
+        .header("Content-Type", "application/json")
+        .body(Body::from(gio_request_json))
+        .unwrap();
+
+    handle_gio(mock_request).await
+}
+
+async fn handle_gio(req: Request<Body>) -> Result<Response<Body>, Infallible> {
+    let whole_body = hyper::body::to_bytes(req.into_body()).await;
+    match whole_body {
+        Ok(body) => {
+            let gio_request: Result<GIORequest, _> = serde_json::from_slice(&body);
+            match gio_request {
+                Ok(gio_req) => {
+                    println!("Received GIORequest: {:?}", gio_req);
+                    let resp = json!({ "status": "success" });
+                    Ok(Response::new(Body::from(resp.to_string())))
+                }
+                Err(_) => {
+                    let resp = json!({ "error": "Invalid JSON" });
+                    Ok(Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Body::from(resp.to_string()))
+                        .unwrap())
+                }
+            }
+        }
         Err(_) => {
-            eprintln!("ROLLUP_HTTP_SERVER_URL not set");
-            return Ok(Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("ROLLUP_HTTP_SERVER_URL not set"))
-                .unwrap());
-        }
-    };
-
-    let gio_url = format!("{}/gio", rollup_url);
-
-    match reqwest::Client::new()
-        .post(&gio_url)
-        .json(&gio_request)
-        .send()
-        .await
-    {
-        Ok(res) if res.status().is_success() => {
+            let resp = json!({ "error": "Could not read request body" });
             Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from("Forwarded successfully"))
-                .unwrap())
-        }
-        Ok(res) => {
-            let status = res.status();
-            let msg = format!("Failed to forward request. Upstream status: {}", status);
-            eprintln!("{}", msg);
-            Ok(Response::builder()
-                .status(status)
-                .body(Body::from(msg))
-                .unwrap())
-        }
-        Err(err) => {
-            eprintln!("Error sending request to rollup server: {}", err);
-            Ok(Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .body(Body::from(format!("Error forwarding: {}", err)))
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(resp.to_string()))
                 .unwrap())
         }
     }
