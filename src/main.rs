@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 async fn router(req: Request<Body>) -> Result<Response<Body>, Infallible> {
     match (req.method(), req.uri().path()) {
-        (&Method::POST, "/completion") => handle_completion(req).await,
+        (&Method::POST, "/v1/chat/completions") => handle_completion(req).await,
         (&Method::POST, "/gio") => handle_gio(req).await,
         _ => Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
